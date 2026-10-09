@@ -988,6 +988,11 @@ class Envs:
     SGLANG_MM_BUFFER_SIZE_MB = EnvInt(0)
     SGLANG_MM_PRECOMPUTE_HASH = EnvBool(False)
     SGLANG_VIT_ENABLE_CUDA_GRAPH = EnvBool(False)
+    # Experimental: allow WeLM-VL under PD disaggregation. The text backbone's
+    # PD support (see the ngram manager's disaggregation decode-row rebuild)
+    # already normalizes image tokens, but the combined vision+PD path is not
+    # yet validated end-to-end. Enabled explicitly for bring-up testing only.
+    SGLANG_WELM_VL_ALLOW_PD = EnvBool(False)
     # Use the fully-vectorized ViT position-embedding interpolation (no per-image
     # Python loop / CPU<->GPU sync). Bit-exact with the legacy implementation;
     # set False to fall back to the per-image loop.

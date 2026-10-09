@@ -5879,7 +5879,11 @@ class ServerArgs:
                 self.encoder_only or self.language_only,
                 "encoder/language-only deployment",
             ),
-            (self.disaggregation_mode != "null", "PD disaggregation"),
+            (
+                self.disaggregation_mode != "null"
+                and not envs.SGLANG_WELM_VL_ALLOW_PD.get(),
+                "PD disaggregation",
+            ),
             (self.enable_pdmux, "--enable-pdmux"),
             (self.pp_size != 1, "pipeline parallelism"),
             (
@@ -5901,6 +5905,15 @@ class ServerArgs:
         if self.enable_multimodal is False:
             raise ValueError("WeLM-VL requires --enable-multimodal.")
         self.enable_multimodal = True
+        if self.disaggregation_mode != "null":
+            logger.warning(
+                "WeLM-VL PD disaggregation is EXPERIMENTAL: it is only reachable "
+                "because SGLANG_WELM_VL_ALLOW_PD is set. The ngram history is "
+                "rebuilt on decode admission from the request token history and "
+                "its multimodal inputs, but this combined vision+PD path has not "
+                "been validated end to end. Verify that responses actually "
+                "describe the supplied images, not just that requests succeed."
+            )
         # The WeLM graph policy below validates the requested text prefill
         # backend. VL prepares vision/base/OE embeddings eagerly before replay;
         # neither image hashes nor a second OE fusion enter the captured body.
