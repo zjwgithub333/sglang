@@ -993,6 +993,14 @@ class Envs:
     # already normalizes image tokens, but the combined vision+PD path is not
     # yet validated end-to-end. Enabled explicitly for bring-up testing only.
     SGLANG_WELM_VL_ALLOW_PD = EnvBool(False)
+    # Diagnostic: keep the WeLM-VL prefill graph's OE n-gram computation inside
+    # the captured graph instead of composing base/OE embeddings eagerly outside
+    # it. The eager boundary exists because image placeholders are radix-cache
+    # hashes rather than logical token ids, so in-graph OE would corrupt them.
+    # It is therefore ONLY valid for batches that contain no image inputs. Turn
+    # this on to quantify the eager-embedding boundary cost on text-only
+    # workloads; never enable it for image workloads.
+    SGLANG_WELM_VL_PREFILL_NO_EAGER_EMBED = EnvBool(False)
     # Use the fully-vectorized ViT position-embedding interpolation (no per-image
     # Python loop / CPU<->GPU sync). Bit-exact with the legacy implementation;
     # set False to fall back to the per-image loop.

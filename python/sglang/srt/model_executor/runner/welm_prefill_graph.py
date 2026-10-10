@@ -174,6 +174,18 @@ class WelmPrefillGraphAdapter:
         self.eager_input_embeddings = bool(
             getattr(self.model.config, "_welmv4_vlm_target_only", False)
         )
+        if (
+            self.eager_input_embeddings
+            and envs.SGLANG_WELM_VL_PREFILL_NO_EAGER_EMBED.get()
+        ):
+            logger.warning(
+                "SGLANG_WELM_VL_PREFILL_NO_EAGER_EMBED is set: the WeLM-VL prefill "
+                "graph will compute OE n-gram ids inside the captured graph instead "
+                "of composing base/OE embeddings eagerly. This is ONLY correct for "
+                "batches without image inputs - image placeholders are radix-cache "
+                "hashes, so in-graph OE corrupts image requests."
+            )
+            self.eager_input_embeddings = False
         if self.eager_input_embeddings and not runner.buffer_registry.has_slot(
             "input_embeds"
         ):
