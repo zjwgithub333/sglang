@@ -195,8 +195,21 @@ class WelmPrefillGraphAdapter:
         self._oe_diag_mode = os.environ.get("WELM_OE_DIAG", "0").strip().lower()
         self._oe_diag_enabled = self._oe_diag_mode not in ("", "0", "off", "false")
         self._oe_diag_fused = self._oe_diag_mode not in ("ids", "1ids")
-        self._oe_diag_max = int(os.environ.get("WELM_OE_DIAG_BATCHES", "3"))
+        self._oe_diag_max = int(os.environ.get("WELM_OE_DIAG_BATCHES", "5"))
+        # PD warmup (4 tokens) and the periodic keepalive prefill (1 token)
+        # arrive long before any real prompt; without a floor they consume the
+        # whole diag budget and the real 6k-token batch is never measured.
+        self._oe_diag_min_rows = int(os.environ.get("WELM_OE_DIAG_MIN_ROWS", "1024"))
         self._oe_diag_done = 0
+        self._oe_diag_skipped = 0
+        if self._oe_diag_enabled:
+            logger.warning(
+                "[WELM_OE_DIAG] armed: mode=%s max_batches=%d min_rows=%d "
+                "(batches with real_rows < min_rows are skipped)",
+                self._oe_diag_mode,
+                self._oe_diag_max,
+                self._oe_diag_min_rows,
+            )
         self.backend = runner.model_runner.attn_backend
         self.max_tokens = runner.max_num_tokens
         self.device = runner.device
@@ -605,6 +618,17 @@ class WelmPrefillGraphAdapter:
         """
         if not self._oe_diag_enabled or self._oe_diag_done >= self._oe_diag_max:
             return
+        if real_rows < self._oe_diag_min_rows:
+            self._oe_diag_skipped += 1
+            if self._oe_diag_skipped % 20 == 1:
+                logger.warning(
+                    "[WELM_OE_DIAG] skipped=%d small batches (real_rows=%d < "
+                    "WELM_OE_DIAG_MIN_ROWS=%d); still waiting for a real prompt",
+                    self._oe_diag_skipped,
+                    real_rows,
+                    self._oe_diag_min_rows,
+                )
+            return
         self._oe_diag_done += 1
         model = self.model
         tag = "[WELM_OE_DIAG] n=%d" % self._oe_diag_done
@@ -647,6 +671,32 @@ class WelmPrefillGraphAdapter:
                     n_ids_bad,
                     real_rows,
                 )
+
+            # ---- step 1b: is the fusion mask / oe-id slot actually bound? --
+            mask = getattr(static, "welm_prefill_token_mask", None)
+            if mask is None:
+                logger.warning("%s [mask] static.welm_prefill_token_mask is None", tag)
+            else:
+                m_sum = int(mask.sum().item())
+                m_head = (
+                    int(mask[:real_rows].sum().item())
+                    if mask.numel() >= real_rows
+                    else None
+                )
+                logger.warning(
+                    "%s [mask] shape=%s dtype=%s sum[all]=%d sum[:real_rows]=%s",
+                    tag,
+                    tuple(mask.shape),
+                    mask.dtype,
+                    m_sum,
+                    m_head,
+                )
+            logger.warning(
+                "%s [bind] static.welm_prefill_oe_ids=%s live.welm_prefill_oe_ids=%s",
+                tag,
+                getattr(static, "welm_prefill_oe_ids", None) is not None,
+                getattr(live, "welm_prefill_oe_ids", None) is not None,
+            )
 
             if not self._oe_diag_fused:
                 return
