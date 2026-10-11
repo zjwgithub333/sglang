@@ -175,6 +175,9 @@ class WelmPrefillGraphAdapter:
         self.eager_input_embeddings = bool(
             getattr(self.model.config, "_welmv4_vlm_target_only", False)
         )
+        # True only when SGLANG_WELM_VL_PREFILL_NO_EAGER_EMBED turned the eager
+        # embedding boundary off for the VL wrapper (see below).
+        self.in_graph_oe_forced = False
         if (
             self.eager_input_embeddings
             and envs.SGLANG_WELM_VL_PREFILL_NO_EAGER_EMBED.get()
@@ -187,6 +190,12 @@ class WelmPrefillGraphAdapter:
                 "hashes, so in-graph OE corrupts image requests."
             )
             self.eager_input_embeddings = False
+            # The wrapper will now pass input_embeds=None on replay, so the
+            # captured body must own the embedding + OE fusion (see
+            # PrefillCudaGraphRunner._run_forward). Pure-text WeLM keeps
+            # eager_input_embeddings False without this flag: its caller still
+            # supplies the composed embeddings through the slot.
+            self.in_graph_oe_forced = True
         if self.eager_input_embeddings and not runner.buffer_registry.has_slot(
             "input_embeds"
         ):
@@ -573,12 +582,13 @@ class WelmPrefillGraphAdapter:
             logger.warning(
                 "[WELM_OE_DIAG] capture: batch.input_embeds=%s "
                 "has_input_embeds_slot=%s eager_input_embeddings=%s "
-                "-> body frozen on %s",
+                "in_graph_oe_forced=%s -> body frozen on %s",
                 "None"
                 if getattr(batch, "input_embeds", None) is None
                 else tuple(batch.input_embeds.shape),
                 self.runner.buffer_registry.has_slot("input_embeds"),
                 self.eager_input_embeddings,
+                self.in_graph_oe_forced,
                 "SLOT"
                 if getattr(batch, "input_embeds", None) is not None
                 else "embed_tokens(input_ids)",

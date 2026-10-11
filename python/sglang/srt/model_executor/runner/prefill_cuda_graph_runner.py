@@ -681,11 +681,28 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
                     and self.welm_adapter.eager_input_embeddings
                 ):
                     layer_kwargs["skip_oe_fusion"] = True
+                # SGLANG_WELM_VL_PREFILL_NO_EAGER_EMBED: the WeLM-VL wrapper
+                # no longer composes text/OE embeddings eagerly, so it hands
+                # input_embeds=None to the body. welmv4.forward freezes
+                # "input_embeds is None ? embed_tokens(input_ids)+OE : read the
+                # static slot" at capture time; passing the slot here froze the
+                # SLOT branch, and nothing writes that slot on replay (the
+                # wrapper passes None), so every request ran on zero
+                # embeddings. Feed None so the body captures the in-graph
+                # embedding + OE path instead. Scoped to that switch only: the
+                # plain text model still gets its embeddings through the slot.
+                if (
+                    self.welm_adapter is not None
+                    and self.welm_adapter.in_graph_oe_forced
+                ):
+                    capture_input_embeds = None
+                else:
+                    capture_input_embeds = forward_batch.input_embeds
                 return self.layer_model.forward(
                     forward_batch.input_ids,
                     positions,
                     forward_batch,
-                    forward_batch.input_embeds,
+                    capture_input_embeds,
                     **layer_kwargs,
                 )
             # tc_piecewise: compile/capture the outer model.forward path.
