@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 from bisect import bisect_left
 from contextvars import ContextVar
 from typing import TYPE_CHECKING
@@ -190,6 +191,12 @@ class WelmPrefillGraphAdapter:
             "input_embeds"
         ):
             raise ValueError("WeLM VL prefill graph requires an input embedding buffer")
+        # --- diagnostic only (WELM_OE_DIAG), see _oe_diag_maybe() ----------
+        self._oe_diag_mode = os.environ.get("WELM_OE_DIAG", "0").strip().lower()
+        self._oe_diag_enabled = self._oe_diag_mode not in ("", "0", "off", "false")
+        self._oe_diag_fused = self._oe_diag_mode not in ("ids", "1ids")
+        self._oe_diag_max = int(os.environ.get("WELM_OE_DIAG_BATCHES", "3"))
+        self._oe_diag_done = 0
         self.backend = runner.model_runner.attn_backend
         self.max_tokens = runner.max_num_tokens
         self.device = runner.device
@@ -561,6 +568,7 @@ class WelmPrefillGraphAdapter:
             if ids is None or ids.shape != (len(self.model.oe_grams), real_rows):
                 raise RuntimeError("WeLM prepared OE IDs do not match the real request rows")
             self.oe_ids[:, :real_rows].copy_(ids)
+            self._oe_diag_maybe(live, static, real_rows, capacity)
         if static.num_token_non_padded is not None:
             self.local_valid_rows.copy_(static.num_token_non_padded)
         else:
@@ -580,6 +588,91 @@ class WelmPrefillGraphAdapter:
         # Arbitrary-position fused QKV may load padded positions as well.
         static.positions[real_rows:capacity].zero_()
         self.current_batch = static
+
+    def _oe_diag_maybe(self, live, static, real_rows: int, capacity: int) -> None:
+        """Diagnostic only (WELM_OE_DIAG=1): compare the in-graph OE result
+        against the eager (known-correct) result for the very same batch.
+
+        Step 1 (always, no collectives): are the prepared OE ids equal to the
+        ids the eager path would compute?
+        Step 2 (WELM_OE_DIAG=1, has TP collectives): is the final fused
+        embedding equal?  Use WELM_OE_DIAG=ids to skip step 2.
+
+        Reading:
+          ids differ            -> wrong id source fed into the OE hash
+          ids equal, fused diff -> the fusion / padding-mask step is wrong
+          both equal            -> OE is fine; look elsewhere (positions, mask)
+        """
+        if not self._oe_diag_enabled or self._oe_diag_done >= self._oe_diag_max:
+            return
+        self._oe_diag_done += 1
+        model = self.model
+        tag = "[WELM_OE_DIAG] n=%d" % self._oe_diag_done
+        try:
+            live_ids = live.input_ids[:real_rows]
+            static_ids = static.input_ids
+            logger.warning(
+                "%s real_rows=%d capacity=%d len(live.input_ids)=%d "
+                "static.input_ids=%s extend_seq_lens=%s oe_grams=%s",
+                tag,
+                real_rows,
+                capacity,
+                int(live.input_ids.numel()),
+                tuple(static_ids.shape) if static_ids is not None else None,
+                list(live.extend_seq_lens_cpu or []),
+                list(getattr(model, "oe_grams", []) or []),
+            )
+
+            # ---- step 1: prepared ids vs recomputed (eager) ids -----------
+            prepared = self.oe_ids[:, :real_rows]
+            recomputed = model._compute_oe_hashed_ids(live_ids, live)
+            if recomputed is None:
+                logger.warning("%s recomputed OE ids is None -> abort diag", tag)
+                return
+            n_bad = int((prepared != recomputed).sum().item())
+            logger.warning(
+                "%s [ids] prepared_vs_recomputed mismatch=%d/%d ; "
+                "prepared[0][:8]=%s ; recomputed[0][:8]=%s",
+                tag,
+                n_bad,
+                int(recomputed.numel()),
+                prepared[0][:8].tolist() if prepared.numel() else [],
+                recomputed[0][:8].tolist() if recomputed.numel() else [],
+            )
+            if static_ids is not None:
+                n_ids_bad = int((live_ids != static_ids[:real_rows]).sum().item())
+                logger.warning(
+                    "%s [ids] live_vs_static input_ids mismatch=%d/%d",
+                    tag,
+                    n_ids_bad,
+                    real_rows,
+                )
+
+            if not self._oe_diag_fused:
+                return
+
+            # ---- step 2: final fused embedding, graph path vs eager path --
+            with torch.no_grad():
+                fused_graph = model._compute_oe_embedding(
+                    static_ids, static, model.embed_tokens(static_ids)
+                )
+                fused_eager = model._compute_oe_embedding(
+                    live_ids, live, model.embed_tokens(live_ids)
+                )
+            d = (fused_graph[:real_rows] - fused_eager).abs()
+            row_max = d.max(dim=-1).values
+            logger.warning(
+                "%s [fused] max|Δ|=%.6e mean|Δ|=%.6e rows_diff(>1e-3)=%d/%d "
+                "rows_diff(>1e-1)=%d",
+                tag,
+                float(d.max().item()),
+                float(d.mean().item()),
+                int((row_max > 1e-3).sum().item()),
+                real_rows,
+                int((row_max > 1e-1).sum().item()),
+            )
+        except Exception as exc:  # diagnostics must never take the server down
+            logger.warning("%s FAILED: %r", tag, exc)
 
     def finish_prompt(self, hidden_states, residual, positions, batch):
         """T-only graph tail. Persistent outputs live outside both graph pools."""
