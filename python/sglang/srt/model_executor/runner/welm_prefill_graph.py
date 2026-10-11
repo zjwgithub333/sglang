@@ -202,6 +202,7 @@ class WelmPrefillGraphAdapter:
         self._oe_diag_min_rows = int(os.environ.get("WELM_OE_DIAG_MIN_ROWS", "1024"))
         self._oe_diag_done = 0
         self._oe_diag_skipped = 0
+        self._oe_diag_capture_logged = False
         if self._oe_diag_enabled:
             logger.warning(
                 "[WELM_OE_DIAG] armed: mode=%s max_batches=%d min_rows=%d "
@@ -561,6 +562,27 @@ class WelmPrefillGraphAdapter:
         self.capture_keys.add(key)
         if batch.welm_prefill_graph_phase == "prompt":
             self.captured_states[key] = batch.model_specific_states
+        # Which branch did the captured body freeze?
+        #   welmv4.forward:  input_embeds is None -> embed_tokens(input_ids)+OE
+        #                    else                -> reads the static slot
+        # If the body captured "read the slot" but replay never writes it
+        # (VL wrapper passes input_embeds=None when eager_input_embeddings is
+        # off), the model silently consumes stale embeddings.
+        if self._oe_diag_enabled and not self._oe_diag_capture_logged:
+            self._oe_diag_capture_logged = True
+            logger.warning(
+                "[WELM_OE_DIAG] capture: batch.input_embeds=%s "
+                "has_input_embeds_slot=%s eager_input_embeddings=%s "
+                "-> body frozen on %s",
+                "None"
+                if getattr(batch, "input_embeds", None) is None
+                else tuple(batch.input_embeds.shape),
+                self.runner.buffer_registry.has_slot("input_embeds"),
+                self.eager_input_embeddings,
+                "SLOT"
+                if getattr(batch, "input_embeds", None) is not None
+                else "embed_tokens(input_ids)",
+            )
 
     def prepare_replay(self, live: ForwardBatch, static: ForwardBatch, capacity: int):
         self._bind(static, capacity)
@@ -721,6 +743,41 @@ class WelmPrefillGraphAdapter:
                 real_rows,
                 int((row_max > 1e-1).sum().item()),
             )
+
+            # ---- step 3: what does the captured body actually read? -------
+            ie_slot = getattr(static, "input_embeds", None)
+            if ie_slot is None:
+                logger.warning("%s [slot] static.input_embeds is None", tag)
+            else:
+                head = ie_slot[:real_rows]
+                with torch.no_grad():
+                    nan_rows = int(torch.isnan(head).any(dim=-1).sum().item())
+                    row_abs = head.abs().max(dim=-1).values
+                    zero_rows = int((row_abs == 0).sum().item())
+                    d_slot = (head - fused_eager).abs()
+                    s_row = d_slot.max(dim=-1).values
+                    slot_max = float(head.abs().max().item())
+                    slot_mean = float(head.abs().mean().item())
+                    slot_diff = float(d_slot.max().item())
+                    slot_bad = int((s_row > 1e-1).sum().item())
+                logger.warning(
+                    "%s [slot] shape=%s max|v|=%.3e mean|v|=%.3e "
+                    "zero_rows=%d/%d nan_rows=%d",
+                    tag,
+                    tuple(ie_slot.shape),
+                    slot_max,
+                    slot_mean,
+                    zero_rows,
+                    real_rows,
+                    nan_rows,
+                )
+                logger.warning(
+                    "%s [slot] vs fused_eager max|Δ|=%.6e rows_diff(>1e-1)=%d/%d",
+                    tag,
+                    slot_diff,
+                    slot_bad,
+                    real_rows,
+                )
         except Exception as exc:  # diagnostics must never take the server down
             logger.warning("%s FAILED: %r", tag, exc)
 
