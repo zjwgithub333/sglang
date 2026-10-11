@@ -589,9 +589,13 @@ class WelmPrefillGraphAdapter:
                 self.runner.buffer_registry.has_slot("input_embeds"),
                 self.eager_input_embeddings,
                 self.in_graph_oe_forced,
-                "SLOT"
-                if getattr(batch, "input_embeds", None) is not None
-                else "embed_tokens(input_ids)",
+                # NOTE: batch.input_embeds above is always the slot tensor, so
+                # it cannot tell us which branch the body froze on. What
+                # matters is the argument _run_forward hands to
+                # layer_model.forward: None when in_graph_oe_forced is set.
+                "embed_tokens(input_ids)+OE (forced in-graph)"
+                if self.in_graph_oe_forced
+                else "SLOT (embeddings supplied through the slot)",
             )
 
     def prepare_replay(self, live: ForwardBatch, static: ForwardBatch, capacity: int):
