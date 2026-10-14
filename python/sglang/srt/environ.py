@@ -689,9 +689,10 @@ class Envs:
     SGLANG_NPU_WELMV4_MOE_STAGE_DUMP_SKIP_CALLS = EnvInt(0)
     SGLANG_NPU_WELMV4_MOE_STAGE_DUMP_MAX_CALLS = EnvInt(1)
     SGLANG_NPU_WELMV4_MOE_STAGE_DUMP_PREFILL_ONLY = EnvBool(True)
-    # BF16/MXFP8 WeLM target prefill, non-consumer EP; only shared gate/up may
-    # overlap TopK with NPU multi-stream enabled. The rest precedes MegaMoE.
+    # BF16/MXFP8 WeLM target prefill, non-consumer EP.
     WELM_NPU_USE_MEGAMOE = EnvBool(False)
+    # Fuse shared experts on selected MegaMoE calls, including prefill BCG.
+    WELM_NPU_MEGAMOE_FUSE_SHARED_EXPERT = EnvBool(False)
     # With MegaMoE enabled, require padded prefill rows before attention-TP
     # scattering to exceed this threshold. Zero keeps the existing selection.
     WELM_NPU_MEGAMOE_PREFILL_TOKEN_THRESHOLD = EnvInt(0)
